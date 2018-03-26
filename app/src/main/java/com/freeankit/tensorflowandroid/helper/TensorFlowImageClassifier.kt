@@ -1,168 +1,125 @@
 package com.freeankit.tensorflowandroid.helper
 
+import android.annotation.SuppressLint
 import android.content.res.AssetManager
 import android.graphics.Bitmap
-import android.support.v4.os.TraceCompat
-import android.util.Log
+import org.tensorflow.lite.Interpreter
 import java.io.BufferedReader
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStreamReader
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import java.util.*
+import kotlin.experimental.and
 
 
 /**
  * @author Ankit Kumar (ankitdroiddeveloper@gmail.com) on 26/03/2018 (MM/DD/YYYY)
  */
 class TensorFlowImageClassifier : Classifier() {
-    private val TAG = "ImageClassifier"
 
-    // Only return this many results with at least this confidence.
+
     private val MAX_RESULTS = 3
+    private val BATCH_SIZE = 1
+    private val PIXEL_SIZE = 3
     private val THRESHOLD = 0.1f
 
-    // Config values.
-    private var inputName: String? = null
-    private var outputName: String? = null
+    private var interpreter: Interpreter? = null
     private var inputSize: Int = 0
-    private var imageMean: Int = 0
-    private var imageStd: Float = 0.toFloat()
-
-    // Pre-allocated buffers.
-    private val labels = Vector<String>()
-    private var intValues: IntArray? = null
-    private var floatValues: FloatArray? = null
-    private var outputs: FloatArray? = null
-    private var outputNames: Array<String>? = null
-
-    private var inferenceInterface: TensorFlowInferenceInterface? = null
-
-    private var runStats = false
+    private var labelList: List<String>? = null
 
 
-    /**
-     * Initializes a native TensorFlow session for classifying images.
-     *
-     * @param assetManager  The asset manager to be used to load assets.
-     * @param modelFilename The filepath of the model GraphDef protocol buffer.
-     * @param labelFilename The filepath of label file for classes.
-     * @param inputSize     The input size. A square image of inputSize x inputSize is assumed.
-     * @param imageMean     The assumed mean of the image values.
-     * @param imageStd      The assumed std of the image values.
-     * @param inputName     The label of the image input node.
-     * @param outputName    The label of the output node.
-     * @throws IOException
-     */
     @Throws(IOException::class)
-    fun create(
-            assetManager: AssetManager,
-            modelFilename: String,
-            labelFilename: String,
-            inputSize: Int,
-            imageMean: Int,
-            imageStd: Float,
-            inputName: String,
-            outputName: String): Classifier {
-        val c = TensorFlowImageClassifier()
-        c.inputName = inputName
-        c.outputName = outputName
+    fun create(assetManager: AssetManager,
+               modelPath: String,
+               labelPath: String,
+               inputSize: Int): Classifier {
 
-        // Read the label names into memory.
-        // TODO(andrewharp): make this handle non-assets.
-        val actualFilename = labelFilename.split("file:///android_asset/".toRegex()).dropLastWhile { it.isEmpty() }.toTypedArray()[1]
-        Log.i(TAG, "Reading labels from: " + actualFilename)
-        var br: BufferedReader? = null
-        br = BufferedReader(InputStreamReader(assetManager.open(actualFilename)))
-        val line: String
-        line = br.readLine()
-        while (line != null) {
-            c.labels.add(line)
-        }
-        br.close()
+        val classifier = TensorFlowImageClassifier()
+        classifier.interpreter = Interpreter(classifier.loadModelFile(assetManager, modelPath))
+        classifier.labelList = classifier.loadLabelList(assetManager, labelPath)
+        classifier.inputSize = inputSize
 
-        c.inferenceInterface = TensorFlowInferenceInterface(assetManager, modelFilename)
-        // The shape of the output is [N, NUM_CLASSES], where N is the batch size.
-        val numClasses = c.inferenceInterface!!.graph().operation(outputName).output(0).shape().size(1) as Int
-        Log.i(TAG, "Read " + c.labels.size + " labels, output layer size is " + numClasses)
-
-        // Ideally, inputSize could have been retrieved from the shape of the input operation.  Alas,
-        // the placeholder node for input in the graphdef typically used does not specify a shape, so it
-        // must be passed in as a parameter.
-        c.inputSize = inputSize
-        c.imageMean = imageMean
-        c.imageStd = imageStd
-
-        // Pre-allocate buffers.
-        c.outputNames = arrayOf(outputName)
-        c.intValues = IntArray(inputSize * inputSize)
-        c.floatValues = FloatArray(inputSize * inputSize * 3)
-        c.outputs = FloatArray(numClasses)
-
-        return c
+        return classifier
     }
 
-    override fun recognizeImage(bitmap: Bitmap): List<Recognition> {
-        // Log this method so that it can be analyzed with systrace.
-        TraceCompat.beginSection("recognizeImage")
-
-        TraceCompat.beginSection("preprocessBitmap")
-        // Preprocess the image data from 0-255 int to normalized float based
-        // on the provided parameters.
-        bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        for (i in intValues!!.indices) {
-            val `val` = intValues!![i]
-            floatValues?.set(i * 3 + 0, ((`val` shr 16 and 0xFF) - imageMean) / imageStd)
-            floatValues?.set(i * 3 + 1, ((`val` shr 8 and 0xFF) - imageMean) / imageStd)
-            floatValues?.set(i * 3 + 2, ((`val` and 0xFF) - imageMean) / imageStd)
-        }
-        TraceCompat.endSection()
-
-        // Copy the input data into TensorFlow.
-        TraceCompat.beginSection("feed")
-        inferenceInterface!!.feed(
-                inputName, floatValues, longArrayOf(1, inputSize.toLong(), inputSize.toLong(), 3))
-        TraceCompat.endSection()
-
-        // Run the inference call.
-        TraceCompat.beginSection("run")
-        inferenceInterface!!.run(outputNames, runStats)
-        TraceCompat.endSection()
-
-        // Copy the output Tensor back into the output array.
-        TraceCompat.beginSection("fetch")
-        inferenceInterface!!.fetch(outputName, outputs)
-        TraceCompat.endSection()
-
-        // Find the best classifications.
-        val pq = PriorityQueue<Recognition>(
-                3,
-                Comparator<Recognition> { lhs, rhs ->
-                    // Intentionally reversed to put high confidence at the head of the queue.
-                    java.lang.Float.compare(rhs.confidence!!, lhs.confidence!!)
-                })
-        outputs!!.indices
-                .filter { outputs!![it] > THRESHOLD }
-                .mapTo(pq) {
-                    Recognition(
-                            "" + it, if (labels.size > it) labels[it] else "unknown", outputs!![it], null)
-                }
-        val recognitions = ArrayList<Recognition>()
-        val recognitionsSize = Math.min(pq.size, MAX_RESULTS)
-        for (i in 0 until recognitionsSize) {
-            recognitions.add(pq.poll())
-        }
-        TraceCompat.endSection() // "recognizeImage"
-        return recognitions
-    }
-
-    override fun enableStatLogging(debug: Boolean) {
-        runStats = debug
-    }
-
-    override fun getStatString(): String {
-        return inferenceInterface!!.getStatString()
+    override fun recognizeImage(bitmap: Bitmap): List<Classifier.Recognition> {
+        val byteBuffer = convertBitmapToByteBuffer(bitmap)
+        val result = Array(1) { ByteArray(labelList!!.size) }
+        interpreter!!.run(byteBuffer, result)
+        return getSortedResult(result)
     }
 
     override fun close() {
-        inferenceInterface!!.close()
+        interpreter!!.close()
+        interpreter = null
     }
+
+    @Throws(IOException::class)
+    private fun loadModelFile(assetManager: AssetManager, modelPath: String): MappedByteBuffer {
+        val fileDescriptor = assetManager.openFd(modelPath)
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        val fileChannel = inputStream.getChannel()
+        val startOffset = fileDescriptor.startOffset
+        val declaredLength = fileDescriptor.declaredLength
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+    }
+
+    @Throws(IOException::class)
+    private fun loadLabelList(assetManager: AssetManager, labelPath: String): List<String> {
+        val labelList: MutableList<String> = emptyList<String>().toMutableList()
+        val reader = BufferedReader(InputStreamReader(assetManager.open(labelPath)))
+        val line: String = reader.readLine()
+        while (true) {
+            labelList.add(line)
+        }
+        reader.close()
+        return labelList
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
+        val byteBuffer = ByteBuffer.allocateDirect(BATCH_SIZE * inputSize * inputSize * PIXEL_SIZE)
+        byteBuffer.order(ByteOrder.nativeOrder())
+        val intValues = IntArray(inputSize * inputSize)
+        bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        var pixel = 0
+        for (i in 0 until inputSize) {
+            for (j in 0 until inputSize) {
+                val `val` = intValues[pixel++]
+                byteBuffer.put((`val` shr 16 and 0xFF).toByte())
+                byteBuffer.put((`val` shr 8 and 0xFF).toByte())
+                byteBuffer.put((`val` and 0xFF).toByte())
+            }
+        }
+        return byteBuffer
+    }
+
+    @SuppressLint("DefaultLocale")
+    private fun getSortedResult(labelProbArray: Array<ByteArray>): List<Classifier.Recognition> {
+
+        val pq = PriorityQueue(
+                MAX_RESULTS,
+                Comparator<Recognition> { lhs, rhs -> java.lang.Float.compare(rhs.confidence!!, lhs.confidence!!) })
+
+        for (i in labelList!!.indices) {
+            val confidence = (labelProbArray[0][i] and 0xff.toByte()) / 255.0f
+            if (confidence > THRESHOLD) {
+                pq.add(Recognition("" + i,
+                        if (labelList!!.size > i) labelList!![i] else "unknown",
+                        confidence))
+            }
+        }
+
+        val recognitions: MutableList<Recognition>? = null
+        val recognitionsSize = Math.min(pq.size, MAX_RESULTS)
+        for (i in 0 until recognitionsSize) {
+            recognitions?.add(pq.poll())
+        }
+
+        return recognitions!!
+    }
+
 }

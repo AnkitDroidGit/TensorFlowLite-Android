@@ -12,14 +12,9 @@ import java.util.concurrent.Executors
 
 
 class MainActivity : AppCompatActivity() {
+    private val MODEL_PATH = "mobilenet_quant_v1_224.tflite"
+    private val LABEL_PATH = "graph_label_string.txt"
     private val INPUT_SIZE = 224
-    private val IMAGE_MEAN = 117
-    private val IMAGE_STD = 1f
-    private val INPUT_NAME = "input"
-    private val OUTPUT_NAME = "output"
-
-    private val MODEL_FILE = "file:///android_asset/inception_graph.pb"
-    private val LABEL_FILE = "file:///android_asset/graph_label_strings.txt"
 
     private var classifier: Classifier? = null
     private val executor = Executors.newSingleThreadExecutor()
@@ -75,7 +70,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        executor.execute { classifier.close() }
+        executor.execute { classifier?.close() }
     }
 
     private fun initTensorFlowAndLoadModel() {
@@ -83,13 +78,9 @@ class MainActivity : AppCompatActivity() {
             try {
                 classifier = TensorFlowImageClassifier().create(
                         assets,
-                        MODEL_FILE,
-                        LABEL_FILE,
-                        INPUT_SIZE,
-                        IMAGE_MEAN,
-                        IMAGE_STD,
-                        INPUT_NAME,
-                        OUTPUT_NAME)
+                        MODEL_PATH,
+                        LABEL_PATH,
+                        INPUT_SIZE)
                 makeButtonVisible()
             } catch (e: Exception) {
                 throw RuntimeException("Error initializing TensorFlow!", e)
