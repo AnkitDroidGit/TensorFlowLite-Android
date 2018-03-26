@@ -143,7 +143,7 @@ class TensorFlowImageClassifier : Classifier() {
                 .filter { outputs!![it] > THRESHOLD }
                 .mapTo(pq) {
                     Recognition(
-                            "" + it, if (labels.size > it) labels.get(it) else "unknown", outputs!![it], null)
+                            "" + it, if (labels.size > it) labels[it] else "unknown", outputs!![it], null)
                 }
         val recognitions = ArrayList<Recognition>()
         val recognitionsSize = Math.min(pq.size, MAX_RESULTS)
